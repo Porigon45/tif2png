@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>顕微鏡 TIFF パネル</title>
+<style>
+  :root { color-scheme: dark; font: 15px system-ui, sans-serif; background: #14191f; color: #edf2f6; }
+  body { box-sizing: border-box; margin: 0; padding: .65rem; height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: .65rem; }
+  h1, h2 { font-size: 1rem; margin: 0 0 .35rem; }
+  h1 { margin: 0; }
+  p { margin: .35rem 0; }
+  section, header { padding: .55rem; border: 1px solid #36434d; border-radius: 6px; background: #202830; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: .65rem; min-height: 0; }
+  aside { overflow: auto; min-height: 0; display: grid; align-content: start; gap: .4rem; }
+  .grid { display: grid; grid-template: repeat(2, minmax(0, 1fr)) / repeat(2, minmax(0, 1fr)); gap: .5rem; min-height: 0; }
+  figure { margin: 0; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: #202830; }
+  figcaption { padding: .2rem .45rem; }
+  canvas { display: block; width: 100%; background: #000; }
+  [hidden] { display: none; }
+  .view { touch-action: none; cursor: crosshair; height: 100%; object-fit: contain; }
+  .grid.pan-mode .view { cursor: grab; }
+  .grid.panning .view { cursor: grabbing; }
+  #preview { width: auto; max-width: 100%; height: auto; }
+  input, select, button { font: inherit; padding: .22rem; border: 1px solid #61717d; border-radius: 4px; }
+  input[type=number] { width: 3.2em; }
+  .tone-grid { display: grid; grid-template-columns: auto 1fr 1fr; gap: .22rem .45rem; align-items: center; }
+  .tone-grid input { width: 100%; min-width: 0; margin: 0; }
+  .tone-grid label { display: flex; align-items: center; }
+  .tone-grid output { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+  #levels { display: grid; gap: .25rem; padding-top: .35rem; }
+  button { cursor: pointer; }
+  button:disabled { cursor: default; opacity: .5; }
+  small, .hint { color: #c1ccd6; }
+  #status { min-height: 1.4em; }
+  #status.error { color: #ffb6a7; }
+  #export { background: #8ee0d6; color: #142525; font-weight: bold; }
+  @media (max-width: 730px) {
+    body { height: auto; }
+    main { grid-template-columns: 1fr; }
+    .grid { grid-template-rows: repeat(2, minmax(0, 1fr)); }
+    figure { min-height: 145px; }
+    .view { max-height: 180px; }
+  }
+</style>
+<header class="controls">
+  <h1>顕微鏡 TIFF パネル</h1>
+  <label>撮影セット <select id="group"></select></label>
+  <label>設定を読み込む <input type="file" id="recipe" accept=".json,application/json"></label>
+  <label>拡大率 <input id="zoom" type="number" min="100" max="800" step="1" value="100"> %</label>
+  <button id="focusRoi" type="button">枠を中央に</button>
+  <button id="resetZoom" type="button">全体表示</button>
+  <label title="Shift を押しながらドラッグでも移動できます"><input id="panMode" type="checkbox"> 視野を移動</label>
+  <details id="skipped" hidden><summary>除外したセット</summary><ul></ul></details>
+</header>
+<main>
+  <div class="grid" id="views">
+    <figure><figcaption>DIC</figcaption><canvas class="view" id="dic" aria-label="DIC の全視野"></canvas></figure>
+    <figure><figcaption>V（Red）</figcaption><canvas class="view" id="red" aria-label="V の全視野"></canvas></figure>
+    <figure><figcaption>R（Green）</figcaption><canvas class="view" id="green" aria-label="R の全視野"></canvas></figure>
+    <figure><figcaption>Merge</figcaption><canvas class="view" id="merge" aria-label="Merge の全視野"></canvas></figure>
+  </div>
+  <aside>
+<section>
+  <h2>位置合わせ（px）</h2>
+  <div class="controls">
+    <span>V</span>
+    <label>X <input id="redX" type="number" value="0"></label>
+    <label>Y <input id="redY" type="number" value="0"></label>
+  </div>
+  <div class="controls">
+    <span>R</span>
+    <label>X <input id="greenX" type="number" value="0"></label>
+    <label>Y <input id="greenY" type="number" value="0"></label>
+  </div>
+  <div class="controls">
+    <button id="suggest">R の自動候補</button>
+    <button id="apply" disabled>候補を反映</button>
+  </div>
+  <small id="candidate"></small>
+  <label><input type="checkbox" id="overlay"> DIC に蛍光を重ねる</label>
+</section>
+<section>
+  <h2>共通の切り抜き枠</h2>
+  <div class="controls">
+    <label>X <input id="x" type="number" value="0" min="0"></label>
+    <label>Y <input id="y" type="number" value="0" min="0"></label>
+    <label>幅 <input id="width" type="number" value="160" min="1"></label>
+    <label>高さ <input id="height" type="number" value="160" min="1"></label>
+  </div>
+  <small>画像上で枠をドラッグできます。</small>
+</section>
+<section>
+  <h2>明るさ・コントラスト</h2>
+  <div class="tone-grid" id="tones">
+    <span></span><small>明るさ</small><small>コントラスト</small>
+  </div>
+  <details><summary>Black / White レベル</summary><div id="levels"></div></details>
+</section>
+<section>
+  <h2>書き出しプレビュー（横1列）</h2>
+  <canvas id="preview" aria-label="ラベルなしの4枚組プレビュー" hidden></canvas>
+  <p id="status" role="status"></p>
+  <button id="export" disabled>PNG・TIFF・設定 JSON を保存</button>
+</section>
+  </aside>
+</main>
+<script>
+  const channels = ["dic", "red", "green"];
+  const panels = [...channels, "merge"];
+  const labels = {dic: "DIC", red: "V", green: "R", merge: "Merge"};
+  const defaultTone = [0, 100];
+  const roiFields = ["x", "y", "width", "height"];
+  const byId = id => document.getElementById(id);
+  const number = id => byId(id).valueAsNumber;
+  let sources = null;
+  const adjusted = new Map();
+  let imageRequest = 0;
+  let candidate = null;
+  let drag = null;
+  const view = {zoom: 1, x: 0, y: 0};
+
+  for (const channel of channels) {
+    const controls = document.createElement("span");
+    controls.innerHTML = `${labels[channel]}
+      <label>Black <input id="${channel}Low" type="number" min="0" max="999" value="0"></label>
+      <label>White <input id="${channel}High" type="number" min="1" max="1000" value="1000"></label>`;
+    byId("levels").append(controls);
+  }
+
+  for (const panel of panels) {
+    const name = document.createElement("span");
+    name.textContent = labels[panel];
+    byId("tones").append(name);
+    for (const [field, label, min, max, value] of [
+      ["Brightness", "明るさ", -100, 100, 0],
+      ["Contrast", "コントラスト", 0, 200, 100],
+    ]) {
+      const control = document.createElement("label");
+      control.innerHTML = `<input type="range" id="${panel + field}" aria-label="${labels[panel]} ${label}"
+        min="${min}" max="${max}" value="${value}"><output id="${panel + field}Value">${value}</output>`;
+      byId("tones").append(control);
+    }
+  }
+
+  function settings() {
+    return {
+      group: byId("group").value,
+      roi: roiFields.map(number),
+      offsets: {red: [number("redX"), number("redY")], green: [number("greenX"), number("greenY")]},
+      levels: Object.fromEntries(channels.map(c => [c, [number(c + "Low"), number(c + "High")]])),
+      tones: Object.fromEntries(panels.map(c => [c, [number(c + "Brightness"), number(c + "Contrast")]])),
+    };
+  }
+
+  function status(message, error = false) {
+    byId("status").textContent = message;
+    byId("status").classList.toggle("error", error);
+  }
+
+  async function request(url, options) {
+    const response = await fetch(url, options);
+    if (!response.ok) throw new Error((await response.json()).error);
+    return response;
+  }
+
+  async function loadSource(group, channel, [low, high]) {
+    const params = new URLSearchParams({group, channel, low, high});
+    const response = await request("/image?" + params);
+    const bitmap = await createImageBitmap(await response.blob());
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext("2d");
+    context.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return context.getImageData(0, 0, canvas.width, canvas.height);
+  }
+
+  function toneValue(value, [brightness, contrast]) {
+    return Math.max(0, Math.min(255, Math.floor(
+      ((2 * value - 255) * contrast + 25500 + 200 * brightness + 100) / 200
+    )));
+  }
+
+  function tonedSource(name, tones, merge) {
+    const key = merge ? "merge-" + name : name;
+    const signature = merge ? [...tones[name], ...tones.merge].join(",") : tones[name].join(",");
+    const cached = adjusted.get(key);
+    if (cached?.signature === signature) return cached.canvas;
+    const source = sources[name];
+    const lut = Uint8Array.from({length: 256}, (_, value) => {
+      const toned = toneValue(value, tones[name]);
+      return merge ? toneValue(toned, tones.merge) : toned;
+    });
+    const canvas = cached?.canvas || document.createElement("canvas");
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const context = canvas.getContext("2d");
+    const pixels = context.createImageData(source.width, source.height);
+    const input = source.data;
+    const output = pixels.data;
+    const red = name !== "green";
+    const green = name !== "red";
+    const blue = name === "dic";
+    for (let i = 0; i < input.length; i += 4) {
+      const value = lut[input[i]];
+      output[i] = red ? value : 0;
+      output[i + 1] = green ? value : 0;
+      output[i + 2] = blue ? value : 0;
+      output[i + 3] = 255;
+    }
+    context.putImageData(pixels, 0, 0);
+    adjusted.set(key, {signature, canvas});
+    return canvas;
+  }
+
+  async function refresh({center = false, focus = center} = {}) {
+    const token = ++imageRequest;
+    const config = settings();
+    sources = null;
+    for (const panel of panels) byId(panel).hidden = true;
+    byId("preview").hidden = true;
+    byId("export").disabled = true;
+    status("TIFF を読み込み中…");
+    try {
+      const entries = await Promise.all(channels.map(async c => [
+        c, await loadSource(config.group, c, config.levels[c]),
+      ]));
+      if (token !== imageRequest) return;
+      sources = Object.fromEntries(entries);
+      adjusted.clear();
+      if (center) {
+        const maxWidth = Math.min(...channels.map(c => sources[c].width));
+        const maxHeight = Math.min(...channels.map(c => sources[c].height));
+        byId("width").value = Math.min(number("width") || 160, maxWidth);
+        byId("height").value = Math.min(number("height") || 160, maxHeight);
+        byId("x").value = Math.floor((maxWidth - number("width")) / 2);
+        byId("y").value = Math.floor((maxHeight - number("height")) / 2);
+      }
+      if (focus) centerViewOnRoi();
+      else setViewOrigin(view.x, view.y);
+      draw();
+    } catch (error) {
+      if (token === imageRequest) status(error.message, true);
+    }
+  }
+
+  function paint(context, panel, config, originX, originY, overlay = false) {
+    const names = panel === "merge" ? ["red", "green"] : [panel];
+    if (overlay) names.push("red", "green");
+    for (const [index, name] of names.entries()) {
+      const [dx, dy] = config.offsets[name] || [0, 0];
+      if (!Number.isInteger(dx) || !Number.isInteger(dy)) continue;
+      context.globalCompositeOperation = index ? "lighter" : "source-over";
+      context.globalAlpha = overlay && index ? 0.6 : 1;
+      context.drawImage(tonedSource(name, config.tones, panel === "merge"), originX + dx, originY + dy);
+    }
+    context.globalAlpha = 1;
+    context.globalCompositeOperation = "source-over";
+  }
+
+  function setViewOrigin(x, y) {
+    if (!sources) return;
+    const {width, height} = sources.dic;
+    view.x = Math.max(0, Math.min(width - width / view.zoom, x));
+    view.y = Math.max(0, Math.min(height - height / view.zoom, y));
+  }
+
+  function centerViewOnRoi() {
+    if (!sources) return;
+    const {width, height} = sources.dic;
+    const [x, y, roiWidth, roiHeight] = settings().roi;
+    const centerX = Number.isFinite(x + roiWidth) && roiWidth > 0 ? x + roiWidth / 2 : width / 2;
+    const centerY = Number.isFinite(y + roiHeight) && roiHeight > 0 ? y + roiHeight / 2 : height / 2;
+    setViewOrigin(centerX - width / (2 * view.zoom), centerY - height / (2 * view.zoom));
+  }
+
+  function setZoom(percent) {
+    view.zoom = percent / 100;
+    centerViewOnRoi();
+    draw(false);
+  }
+
+  function draw(updatePreview = true) {
+    if (!sources) return;
+    const config = settings();
+    const [x, y, width, height] = config.roi;
+    const validRoi = config.roi.every(Number.isInteger) && width > 0 && height > 0;
+    const inBounds = validRoi && channels.every(c => {
+      const [dx, dy] = config.offsets[c] || [0, 0];
+      return [dx, dy].every(Number.isInteger) &&
+        x >= dx && y >= dy && x + width <= dx + sources[c].width &&
+        y + height <= dy + sources[c].height;
+    });
+    for (const panel of panels) {
+      const canvas = byId(panel);
+      canvas.hidden = false;
+      if (canvas.width !== sources.dic.width) canvas.width = sources.dic.width;
+      if (canvas.height !== sources.dic.height) canvas.height = sources.dic.height;
+      const context = canvas.getContext("2d");
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.save();
+      context.scale(view.zoom, view.zoom);
+      context.translate(-view.x, -view.y);
+      context.imageSmoothingEnabled = false;
+      paint(context, panel, config, 0, 0, panel === "dic" && byId("overlay").checked);
+      if (validRoi) {
+        context.strokeStyle = inBounds ? "#4ef0ef" : "#ff805c";
+        context.lineWidth = Math.max(2, canvas.width / 280) / view.zoom;
+        context.strokeRect(x, y, width, height);
+      }
+      context.restore();
+    }
+    if (!updatePreview) return;
+    const preview = byId("preview");
+    preview.hidden = !inBounds;
+    byId("export").disabled = !inBounds;
+    if (!inBounds) {
+      status("整数で指定し、枠全体を3チャネル共通の範囲内に置いてください。", true);
+      return;
+    }
+    preview.width = width * panels.length;
+    preview.height = height;
+    const context = preview.getContext("2d");
+    panels.forEach((panel, index) => {
+      context.save();
+      context.beginPath();
+      context.rect(index * width, 0, width, height);
+      context.clip();
+      paint(context, panel, config, index * width - x, -y);
+      context.restore();
+    });
+    status(`各パネル ${width} × ${height} px、出力 ${preview.width} × ${height} px`);
+  }
+
+  function position(event) {
+    const canvas = event.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height);
+    const left = rect.left + (rect.width - canvas.width * scale) / 2;
+    const top = rect.top + (rect.height - canvas.height * scale) / 2;
+    return [(event.clientX - left) / scale, (event.clientY - top) / scale];
+  }
+
+  function movePointer(event) {
+    if (drag?.id !== event.pointerId) return;
+    const [px, py] = position(event);
+    if (drag.pan) {
+      setViewOrigin(drag.x - (px - drag.px) / view.zoom, drag.y - (py - drag.py) / view.zoom);
+      draw(false);
+      return;
+    }
+    byId("x").value = Math.max(0, Math.round(view.x + px / view.zoom - drag.dx));
+    byId("y").value = Math.max(0, Math.round(view.y + py / view.zoom - drag.dy));
+    draw();
+  }
+
+  for (const panel of panels) {
+    const canvas = byId(panel);
+    canvas.addEventListener("pointerdown", event => {
+      if (!sources || event.button !== 0 || drag) return;
+      const [px, py] = position(event);
+      if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) return;
+      if (event.shiftKey || byId("panMode").checked) {
+        drag = {id: event.pointerId, pan: true, px, py, x: view.x, y: view.y};
+        byId("views").classList.add("panning");
+      } else {
+        const [x, y, width, height] = settings().roi;
+        if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) return;
+        const imageX = view.x + px / view.zoom;
+        const imageY = view.y + py / view.zoom;
+        const inside = imageX >= x && imageY >= y && imageX <= x + width && imageY <= y + height;
+        drag = {id: event.pointerId, dx: inside ? imageX - x : width / 2, dy: inside ? imageY - y : height / 2};
+      }
+      canvas.setPointerCapture(event.pointerId);
+      movePointer(event);
+    });
+    canvas.addEventListener("pointermove", movePointer);
+    canvas.addEventListener("lostpointercapture", () => {
+      drag = null;
+      byId("views").classList.remove("panning");
+    });
+  }
+
+  byId("zoom").addEventListener("change", () => {
+    const value = number("zoom");
+    const percent = Number.isFinite(value) ? Math.max(100, Math.min(800, Math.round(value))) : 100;
+    byId("zoom").value = percent;
+    setZoom(percent);
+  });
+  byId("focusRoi").addEventListener("click", () => {
+    centerViewOnRoi();
+    draw(false);
+  });
+  byId("resetZoom").addEventListener("click", () => {
+    byId("zoom").value = 100;
+    byId("panMode").checked = false;
+    byId("views").classList.remove("pan-mode");
+    setZoom(100);
+  });
+  byId("panMode").addEventListener("change", event => {
+    byId("views").classList.toggle("pan-mode", event.target.checked);
+  });
+
+  function clearCandidate() {
+    candidate = null;
+    byId("apply").disabled = true;
+    byId("candidate").textContent = "";
+  }
+
+  byId("group").addEventListener("change", () => {
+    clearCandidate();
+    for (const id of ["redX", "redY", "greenX", "greenY"]) byId(id).value = 0;
+    refresh({center: true});
+  });
+  for (const id of [...roiFields, "redX", "redY", "greenX", "greenY", "overlay"]) {
+    byId(id).addEventListener("input", () => draw());
+  }
+  byId("levels").addEventListener("change", () => refresh());
+  byId("tones").addEventListener("input", event => {
+    byId(event.target.id + "Value").value = event.target.value;
+    draw();
+  });
+
+  byId("suggest").addEventListener("click", async () => {
+    const {group} = settings();
+    byId("suggest").disabled = true;
+    clearCandidate();
+    try {
+      const response = await request("/suggest?" + new URLSearchParams({group}));
+      const {shift, score} = await response.json();
+      if (settings().group !== group) return;
+      const [dx, dy] = shift;
+      byId("candidate").textContent = `V に対して (${dx}, ${dy}) px。反映後に確認してください。`;
+      if (score > 0) {
+        candidate = shift;
+        byId("apply").disabled = false;
+      } else {
+        byId("candidate").textContent = "位置合わせに使える候補が見つかりません。";
+      }
+    } catch (error) {
+      status(error.message, true);
+    } finally {
+      byId("suggest").disabled = false;
+    }
+  });
+  byId("apply").addEventListener("click", () => {
+    byId("greenX").value = number("redX") + candidate[0];
+    byId("greenY").value = number("redY") + candidate[1];
+    draw();
+  });
+
+  byId("recipe").addEventListener("change", async event => {
+    const input = event.currentTarget;
+    if (!input.files.length) return;
+    try {
+      const recipe = JSON.parse(await input.files[0].text());
+      const available = [...byId("group").options].some(option => option.value === recipe.group);
+      const isIntegerList = (value, length) => Array.isArray(value) &&
+        value.length === length && value.every(Number.isInteger);
+      const validTone = tone => isIntegerList(tone, 2) && tone[0] >= -100 && tone[0] <= 100 &&
+        tone[1] >= 0 && tone[1] <= 200;
+      if (![1, 2].includes(recipe.version) || !available || !isIntegerList(recipe.roi, 4) ||
+          !["red", "green"].every(c => isIntegerList(recipe.offsets?.[c], 2)) ||
+          !channels.every(c => isIntegerList(recipe.levels?.[c], 2)) ||
+          (recipe.version === 2 && !panels.every(c => validTone(recipe.tones?.[c])))) {
+        throw new Error("設定 JSON の形式、または撮影セットを確認してください。");
+      }
+      byId("group").value = recipe.group;
+      roiFields.forEach((field, i) => { byId(field).value = recipe.roi[i]; });
+      for (const c of ["red", "green"]) {
+        [byId(c + "X").value, byId(c + "Y").value] = recipe.offsets[c];
+      }
+      for (const c of channels) {
+        [byId(c + "Low").value, byId(c + "High").value] = recipe.levels[c];
+      }
+      for (const c of panels) {
+        const [brightness, contrast] = recipe.version === 2 ? recipe.tones[c] : defaultTone;
+        byId(c + "Brightness").value = byId(c + "BrightnessValue").value = brightness;
+        byId(c + "Contrast").value = byId(c + "ContrastValue").value = contrast;
+      }
+      clearCandidate();
+      await refresh({focus: true});
+    } catch (error) {
+      status(error.message, true);
+    } finally {
+      input.value = "";
+    }
+  });
+
+  byId("export").addEventListener("click", async () => {
+    try {
+      const response = await request("/export", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(settings()),
+      });
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = response.headers.get("Content-Disposition").match(/filename="([^"]+)"/)[1];
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      status(error.message, true);
+    }
+  });
+
+  async function start() {
+    try {
+      const response = await request("/groups");
+      const {groups, skipped} = await response.json();
+      for (const group of groups) byId("group").add(new Option(group, group));
+      for (const [group, issues] of Object.entries(skipped)) {
+        const item = document.createElement("li");
+        item.textContent = `${group}（不足または重複: ${issues.join(", ")}）`;
+        byId("skipped").querySelector("ul").append(item);
+      }
+      byId("skipped").hidden = !Object.keys(skipped).length;
+      byId("suggest").disabled = !groups.length;
+      if (groups.length) await refresh({center: true});
+      else status("DIC・Red・Green の3枚が揃う撮影セットが見つかりません。", true);
+    } catch (error) {
+      status(error.message, true);
+    }
+  }
+  start();
+</script>
+</html>
